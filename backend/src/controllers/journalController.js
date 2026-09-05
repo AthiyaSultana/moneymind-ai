@@ -7,7 +7,106 @@ const {
 const journalCollection = (uid) =>
   adminDb.collection("users").doc(uid).collection("journalEntries");
 
+/**
+ * Generate a safe fallback response when Gemini is unavailable.
+ *
+ * This keeps the Journal feature functional even when:
+ * - Gemini quota is exhausted
+ * - Gemini temporarily returns 503
+ * - Gemini API is unavailable
+ */
+function generateJournalFallback(message) {
+  const text = message.toLowerCase();
+
+  if (
+    text.includes("spent") ||
+    text.includes("spend") ||
+    text.includes("paid") ||
+    text.includes("bought") ||
+    text.includes("purchase") ||
+    text.includes("expense")
+  ) {
+    return (
+      "I've saved your journal entry. It looks like you may be recording " +
+      "an expense. AI analysis is temporarily unavailable, so please " +
+      "review the entry later."
+    );
+  }
+
+  if (
+    text.includes("income") ||
+    text.includes("salary") ||
+    text.includes("earned") ||
+    text.includes("received")
+  ) {
+    return (
+      "I've saved your journal entry. It looks like you're recording " +
+      "income. AI analysis is temporarily unavailable right now."
+    );
+  }
+
+  if (
+    text.includes("save") ||
+    text.includes("saving") ||
+    text.includes("savings") ||
+    text.includes("investment") ||
+    text.includes("invest")
+  ) {
+    return (
+      "I've saved your journal entry. Your savings or investment-related " +
+      "note is recorded. AI analysis is temporarily unavailable right now."
+    );
+  }
+
+  return (
+    "I've saved your journal entry successfully. " +
+    "AI responses are temporarily unavailable right now, " +
+    "but your information is safe."
+  );
+}
+
+/**
+ * Check whether the Gemini error looks like a quota/rate-limit error.
+ */
+function isGeminiQuotaError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  const code = String(error?.code || "").toLowerCase();
+  const status = String(error?.status || "").toLowerCase();
+
+  return (
+    status === "429" ||
+    code === "429" ||
+    code.includes("resource_exhausted") ||
+    message.includes("429") ||
+    message.includes("quota") ||
+    message.includes("resource exhausted") ||
+    message.includes("rate limit") ||
+    message.includes("free_tier")
+  );
+}
+
+/**
+ * Check whether Gemini is temporarily unavailable.
+ */
+function isGeminiTemporaryError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  const code = String(error?.code || "").toLowerCase();
+  const status = String(error?.status || "").toLowerCase();
+
+  return (
+    status === "503" ||
+    code === "503" ||
+    message.includes("503") ||
+    message.includes("service unavailable") ||
+    message.includes("temporarily unavailable")
+  );
+}
+
+
+// --------------------------------------------------
 // Create a single journal entry
+// --------------------------------------------------
+
 async function createJournalEntry(req, res) {
   try {
     const uid = req.user.uid;
@@ -58,7 +157,11 @@ async function createJournalEntry(req, res) {
   }
 }
 
+
+// --------------------------------------------------
 // Get all journal entries for the authenticated user
+// --------------------------------------------------
+
 async function getJournalEntries(req, res) {
   try {
     const uid = req.user.uid;
@@ -84,11 +187,19 @@ async function getJournalEntries(req, res) {
   }
 }
 
+
+// --------------------------------------------------
 // Send message to Gemini with conversation history
+// --------------------------------------------------
+
 async function sendJournalMessage(req, res) {
   try {
     const uid = req.user.uid;
     const { message } = req.body;
+
+    // --------------------------------------------------
+    // Validate message
+    // --------------------------------------------------
 
     if (!message || typeof message !== "string") {
       return res.status(400).json({
@@ -122,8 +233,6 @@ async function sendJournalMessage(req, res) {
       createdAt: FieldValue.serverTimestamp(),
     });
 
-    console.log("User message saved:", journalRef.id);
-
     // --------------------------------------------------
     // 2. Get conversation history
     // --------------------------------------------------
@@ -139,27 +248,50 @@ async function sendJournalMessage(req, res) {
         role: data.role === "assistant" ? "model" : "user",
         parts: [
           {
-            text: data.content,
+            text: data.content || "",
           },
         ],
       };
     });
 
-    console.log(
-      "Conversation history messages:",
-      history.length
-    );
-
     // --------------------------------------------------
     // 3. Send conversation history to Gemini
     // --------------------------------------------------
 
-    const aiResponse = await generateJournalResponse(history);
+    let aiResponse;
+    let source = "gemini";
 
-    console.log("Gemini response received");
+    try {
+      aiResponse = await generateJournalResponse(history);
+    } catch (geminiError) {
+      // -----------------------------------------------
+      // Gemini failed.
+      //
+      // IMPORTANT:
+      // Do NOT allow Gemini failure to break Journal.
+      // -----------------------------------------------
+
+      if (isGeminiQuotaError(geminiError)) {
+        console.warn(
+          "Gemini quota unavailable. Using Journal fallback."
+        );
+      } else if (isGeminiTemporaryError(geminiError)) {
+        console.warn(
+          "Gemini temporarily unavailable. Using Journal fallback."
+        );
+      } else {
+        console.error(
+          "Gemini Journal request failed. Using fallback:",
+          geminiError?.message || geminiError
+        );
+      }
+
+      aiResponse = generateJournalFallback(trimmedMessage);
+      source = "fallback";
+    }
 
     // --------------------------------------------------
-    // 4. Save Gemini response
+    // 4. Save assistant/fallback response
     // --------------------------------------------------
 
     const assistantRef = journalCollection(uid).doc();
@@ -169,11 +301,6 @@ async function sendJournalMessage(req, res) {
       content: aiResponse,
       createdAt: FieldValue.serverTimestamp(),
     });
-
-    console.log(
-      "Assistant response saved:",
-      assistantRef.id
-    );
 
     // --------------------------------------------------
     // 5. Return both messages to frontend
@@ -190,8 +317,14 @@ async function sendJournalMessage(req, res) {
         role: "assistant",
         content: aiResponse,
       },
+      source,
     });
   } catch (error) {
+    // --------------------------------------------------
+    // Only unexpected application/database errors should
+    // reach this block.
+    // --------------------------------------------------
+
     console.error("========== JOURNAL ERROR ==========");
     console.error("Message:", error.message);
     console.error("Status:", error.status);
@@ -204,6 +337,7 @@ async function sendJournalMessage(req, res) {
     });
   }
 }
+
 
 module.exports = {
   createJournalEntry,

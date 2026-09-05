@@ -11,6 +11,7 @@ function Journal() {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
+
   const [detectedExpense, setDetectedExpense] = useState(null);
   const [savingExpense, setSavingExpense] = useState(false);
 
@@ -90,7 +91,7 @@ function Journal() {
     setSending(true);
     setError("");
 
-    // Clear any previous detected expense
+    // Clear previous expense detection
     setDetectedExpense(null);
 
     // --------------------------------------------------
@@ -140,7 +141,7 @@ function Journal() {
       }
 
       // --------------------------------------------------
-      // 2. Add Gemini response to Journal
+      // 2. Add assistant response to Journal
       // --------------------------------------------------
 
       if (data.assistantMessage) {
@@ -170,17 +171,42 @@ function Journal() {
         );
 
         const expenseData = await expenseResponse.json();
-
         if (
           expenseResponse.ok &&
-          expenseData.expense?.isExpense === true &&
-          typeof expenseData.expense?.amount === "number" &&
-          expenseData.expense.amount > 0
+          expenseData.expense &&
+          expenseData.expense.isExpense === true
         ) {
-          setDetectedExpense(expenseData.expense);
+          const expense = expenseData.expense;
+
+          /*
+           * Only show the confirmation card for meaningful
+           * expense detections.
+           *
+           * High confidence:
+           *   "I spent ₹850 on Swiggy"
+           *
+           * Medium confidence:
+           *   "Dinner was ₹850"
+           *
+           * Low confidence:
+           *   Should normally not be returned as an expense
+           *   by the backend fallback.
+           */
+
+          const confidence = expense.confidence || "high";
+
+          if (
+            confidence === "high" ||
+            confidence === "medium"
+          ) {
+            setDetectedExpense({
+              ...expense,
+              source: expenseData.source || "gemini",
+            });
+          }
         }
       } catch (expenseError) {
-        // Expense detection should never break Journal
+        // Expense detection should NEVER break Journal.
         console.error(
           "Expense detection failed:",
           expenseError
@@ -201,11 +227,35 @@ function Journal() {
   };
 
   // --------------------------------------------------
+  // Update detected expense
+  // --------------------------------------------------
+
+  const updateDetectedExpense = (field, value) => {
+    setDetectedExpense((previousExpense) => {
+      if (!previousExpense) {
+        return previousExpense;
+      }
+
+      return {
+        ...previousExpense,
+        [field]: value,
+      };
+    });
+  };
+
+  // --------------------------------------------------
   // Confirm and save expense
   // --------------------------------------------------
 
   const confirmExpense = async () => {
     if (!detectedExpense || savingExpense) {
+      return;
+    }
+
+    const amount = Number(detectedExpense.amount);
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setError("Please enter a valid expense amount.");
       return;
     }
 
@@ -215,6 +265,19 @@ function Journal() {
 
       const token = await user.getIdToken();
 
+      const expenseToSave = {
+        ...detectedExpense,
+        amount,
+      };
+
+      /*
+       * source is only frontend metadata.
+       * It is not required by the backend save API.
+       */
+      delete expenseToSave.source;
+      delete expenseToSave.confidence;
+      delete expenseToSave.confidenceScore;
+
       const response = await fetch(
         `${API_URL}/api/expenses/save`,
         {
@@ -223,7 +286,7 @@ function Journal() {
             "Content-Type": "application/json",
             Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify(detectedExpense),
+          body: JSON.stringify(expenseToSave),
         }
       );
 
@@ -234,9 +297,6 @@ function Journal() {
           data.error || "Failed to save expense"
         );
       }
-
-      console.log("Expense saved:", data.expense);
-
       setDetectedExpense(null);
     } catch (error) {
       console.error(
@@ -263,6 +323,18 @@ function Journal() {
   // --------------------------------------------------
   // UI
   // --------------------------------------------------
+
+  const detectedAmount =
+    detectedExpense?.amount !== null &&
+    detectedExpense?.amount !== undefined &&
+    detectedExpense?.amount !== ""
+      ? Number(detectedExpense.amount)
+      : "";
+
+  const canSaveExpense =
+    Number.isFinite(Number(detectedAmount)) &&
+    Number(detectedAmount) > 0 &&
+    !savingExpense;
 
   return (
     <div className="flex min-h-[calc(100vh-64px)] flex-col bg-slate-50">
@@ -396,7 +468,7 @@ function Journal() {
                 );
               })}
 
-            {/* Gemini typing indicator */}
+            {/* Typing indicator */}
             {sending && (
               <div className="flex justify-start">
 
@@ -413,7 +485,6 @@ function Journal() {
                   </div>
 
                 </div>
-
               </div>
             )}
 
@@ -431,60 +502,103 @@ function Journal() {
 
           <div className="mb-4">
 
-            <p className="text-sm font-semibold text-slate-900">
-              💰 Expense detected
-            </p>
+            <div className="flex items-center justify-between">
+
+              <p className="text-sm font-semibold text-slate-900">
+                💰 Expense detected
+              </p>
+
+              {detectedExpense.source === "fallback" && (
+                <span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700">
+                  Detected locally
+                </span>
+              )}
+
+            </div>
 
             <p className="mt-1 text-sm text-slate-500">
-              Would you like to add this to your expenses?
+              Please review the details before adding it to your expenses.
             </p>
+
+            {detectedExpense.confidence === "medium" && (
+              <p className="mt-2 text-xs text-amber-600">
+                This looks like a possible expense. Please verify the details.
+              </p>
+            )}
 
           </div>
 
           <div className="rounded-xl bg-slate-50 p-4">
 
             {/* Amount */}
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-4">
 
               <span className="text-sm text-slate-500">
                 Amount
               </span>
 
-              <span className="text-lg font-semibold text-slate-900">
-                ₹{detectedExpense.amount}
-              </span>
+              <div className="flex items-center">
+
+                <span className="mr-1 text-lg font-semibold text-slate-900">
+                  ₹
+                </span>
+
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={detectedAmount}
+                  onChange={(event) =>
+                    updateDetectedExpense(
+                      "amount",
+                      event.target.value
+                    )
+                  }
+                  placeholder="Enter amount"
+                  className="w-32 rounded-lg border border-slate-300 bg-white px-3 py-2 text-right text-sm font-semibold text-slate-900 outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
+                />
+
+              </div>
 
             </div>
 
             {/* Merchant */}
-            <div className="mt-2 flex items-center justify-between">
+            <div className="mt-3 flex items-center justify-between gap-4">
 
               <span className="text-sm text-slate-500">
                 Merchant
               </span>
 
-              <span className="text-sm font-medium text-slate-900">
-                {detectedExpense.merchant ||
-                  "Not specified"}
-              </span>
+              <input
+                type="text"
+                value={detectedExpense.merchant || ""}
+                onChange={(event) =>
+                  updateDetectedExpense(
+                    "merchant",
+                    event.target.value
+                  )
+                }
+                placeholder="Not specified"
+                className="w-48 rounded-lg border border-slate-300 bg-white px-3 py-2 text-right text-sm font-medium text-slate-900 outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
+              />
 
             </div>
 
             {/* Category */}
-            <div className="mt-2 flex items-center justify-between">
+            <div className="mt-3 flex items-center justify-between gap-4">
 
               <span className="text-sm text-slate-500">
                 Category
               </span>
 
               <span className="text-sm font-medium text-slate-900">
-                {detectedExpense.category}
+                {detectedExpense.category || "Other"}
               </span>
 
             </div>
 
             {/* Date */}
-            <div className="mt-2 flex items-center justify-between">
+            <div className="mt-3 flex items-center justify-between gap-4">
 
               <span className="text-sm text-slate-500">
                 Date
@@ -505,7 +619,7 @@ function Journal() {
             <button
               type="button"
               onClick={confirmExpense}
-              disabled={savingExpense}
+              disabled={!canSaveExpense}
               className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {savingExpense
@@ -558,7 +672,6 @@ function Journal() {
                 !event.shiftKey
               ) {
                 event.preventDefault();
-
                 sendMessage(event);
               }
 

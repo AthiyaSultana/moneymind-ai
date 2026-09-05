@@ -16,6 +16,4 @@ const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 // Explicitly connect to the Enterprise Firestore database
 export const db = initializeFirestore(app, {}, "default");
-
-console.log('db', db);
 export default app;

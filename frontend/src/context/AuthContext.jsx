@@ -23,18 +23,14 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       try {
-        console.log('currentuserr', currentUser)
         if (currentUser) {
           const userRef = doc(db, "users", currentUser.uid);
           const userSnapshot = await getDoc(userRef);
-          console.log('ususerSnapshoteREF', userSnapshot);
           if (!userSnapshot.exists()) {
-            console.log("Creating Firestore user document...");
             await setDoc(userRef, {
               email: currentUser.email,
               createdAt: serverTimestamp(),
             });
-            console.log("Firestore user document created successfully!");
           }
         }
 

@@ -11,19 +11,12 @@ const ai = new GoogleGenAI({
 });
 
 async function generateJournalResponse(history, retries = 3, delay = 1000) {
-  console.log("========== GEMINI REQUEST ==========");
-  console.log("Messages in conversation:", history.length);
-  console.log("Time:", new Date().toISOString());
-  console.log("====================================");
-
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       const response = await ai.models.generateContent({
         model: "gemini-3.6-flash",
         contents: history,
       });
-
-      console.log("========== GEMINI SUCCESS ==========");
 
       return response.text;
     } catch (error) {
@@ -34,8 +27,6 @@ async function generateJournalResponse(history, retries = 3, delay = 1000) {
       );
 
       if (error.status === 503 && attempt < retries) {
-        console.log(`Retrying in ${delay}ms...`);
-
         await new Promise((resolve) =>
           setTimeout(resolve, delay)
         );
